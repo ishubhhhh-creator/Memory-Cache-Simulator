@@ -3,146 +3,176 @@
 #include <vector>
 #include <cmath>
 #include <iomanip>
+#include <climits>
+#include <fstream>
 using namespace std;
 #define ll long long
-struct CacheLine {
+
+ll associativity = 0, offset_size = 0, index_size = 0, counter = 0, mask = 0, accesses = 0, hit = 0, miss = 0, writeBack = 0;
+ofstream csvFile;
+ll wSize = 1000, wAccess = 0, wMiss = 0, wId = 0;
+
+struct Line {
     bool valid;
+    bool dirty;
     ll tag;
-    ll last_used_time;
-
-    CacheLine() : valid(false), tag(0), last_used_time(0) {}
+    ll cnt;
+    
+    Line() : valid(false), dirty(false), tag(0), cnt(0) {}
 };
 
-struct CacheSet {
-    vector<CacheLine> lines;
-    CacheSet(int associativity) {
-        lines.resize(associativity);
-    }
-};
-
-class CacheSimulator {
-private:
-    vector<CacheSet> cache;
-    int associativity;
-    ll global_time;
-
-    int offset_bits;
-    int index_bits;
-    ll index_mask;
-
-    ll accesses;
-    ll hits;
-    ll misses;
-
-public:
-    CacheSimulator(int cache_size, int block_size, int assoc) {
-        associativity = assoc;
-        accesses = 0;
-        hits = 0;
-        misses = 0;
-        global_time = 0;
-
-        int num_blocks = cache_size / block_size;
-        int num_sets = num_blocks / associativity;
-
-        for (int i = 0; i < num_sets; ++i) {
-            cache.push_back(CacheSet(associativity));
-        }
-
-        offset_bits = log2(block_size);
-        index_bits = log2(num_sets);
-        
-        index_mask = (1LL << index_bits) - 1; 
-    }
-
-    void access(ll address) {
-        accesses++;
-        global_time++;
-
-        ll shifted_addr = address >> offset_bits;
-        ll index = shifted_addr & index_mask;
-        ll tag = shifted_addr >> index_bits;
-
-        CacheSet& target_set = cache[index];
-
-        for (int i = 0; i < associativity; ++i) {
-            if (target_set.lines[i].valid && target_set.lines[i].tag == tag) {
-                hits++;
-                target_set.lines[i].last_used_time = global_time;
-                return;
-            }
-        }
-
-        misses++;
-
-        int lru_index = 0;
-        ll min_time =LLONG_MIN;
-
-        for (int i = 0; i < associativity; ++i) {
-            if (!target_set.lines[i].valid) {
-                target_set.lines[i].valid = true;
-                target_set.lines[i].tag = tag;
-                target_set.lines[i].last_used_time = global_time;
-                return;
-            }
-
-            if (target_set.lines[i].last_used_time < min_time) {
-                min_time = target_set.lines[i].last_used_time;
-                lru_index = i;
-            }
-        }
-
-        target_set.lines[lru_index].tag = tag;
-        target_set.lines[lru_index].last_used_time = global_time;
-    }
-
-    void printStats() const {
-        cout << "CACHE SIMULATION RESULTS:-\n";
-        cout << "Total Memory Accesses: " << accesses << "\n";
-        cout << "Cache Hits: " << hits << "\n";
-        cout << "Cache Misses: " << misses << "\n";
-        
-        if (accesses > 0) {
-            double hit_rate = ((0.0+hits)/accesses)*100;
-            double miss_rate = ((0.0+misses)/accesses)*100;
-            cout << fixed << setprecision(2);
-            cout << "Hit Rate: " << hit_rate << "%\n";
-            cout << "Miss Rate: " << miss_rate << "%\n";
-        }
+struct Set {
+    vector<Line> lines;
+    Set(ll assoc) {
+        lines.resize(assoc);
     }
 };
 
-CacheSimulator* l1_cache;
+vector<Set> cache;
 
-VOID RecordMemAccess(VOID* addr) {
+void initCache(ll cache_size, ll block_size, ll assoc) {
+    associativity = assoc;
+    accesses = 0;
+    hit = 0;
+    miss = 0;
+    counter = 0;
+    wAccess = 0;
+    wMiss = 0;
+    wId = 0;
+
+    ll num_blocks = cache_size / block_size;
+    ll num_sets = num_blocks / associativity;
+    
+    cache.clear();
+    for (int i = 0; i < num_sets; i++) {
+        cache.push_back(Set(associativity));
+    }
+    
+    offset_size = log2(block_size);
+    index_size = log2(num_sets);
+    mask = (1LL << index_size) - 1;
+    
+    csvFile.open("miss.csv");
+    csvFile << "window,accesses,misses\n";
+}
+
+void access(ll address, bool isWrite) {
+    accesses++;
+    wAccess++;
+    counter++;
+
+    ll shifted_addr = address >> offset_size;
+    ll index = shifted_addr & mask;
+    ll tag = shifted_addr >> index_size;
+
+    Set& inSet = cache[index];
+
+    // Check for Hit
+    for (int i = 0; i < associativity; i++) {
+        if (inSet.lines[i].valid && inSet.lines[i].tag == tag) {
+            hit++;
+            inSet.lines[i].cnt = counter;
+            inSet.lines[i].dirty |= isWrite;
+            
+            if (wAccess >= wSize) {
+                csvFile << wId << "," << wAccess << "," << wMiss << "\n";
+                wId++;
+                wAccess = 0;
+                wMiss = 0;
+            }
+            return;
+        }
+    }
+
+    // Miss Handler
+    miss++;
+    wMiss++;
+    int idx = 0;
+    ll mn = LLONG_MAX;
+
+    for (int i = 0; i < associativity; i++) {
+        if (!inSet.lines[i].valid) {
+            idx = i;
+            break;
+        }
+        if (inSet.lines[i].cnt < mn) {
+            mn = inSet.lines[i].cnt;
+            idx = i;
+        }
+    }
+
+    if (inSet.lines[idx].dirty) {
+        writeBack++;
+    }
+
+    inSet.lines[idx].valid = true;
+    inSet.lines[idx].tag = tag;
+    inSet.lines[idx].cnt = counter;
+    inSet.lines[idx].dirty = isWrite;
+
+    if (wAccess >= wSize) {
+        csvFile << wId << "," << wAccess << "," << wMiss << "\n";
+        wId++;
+        wAccess = 0;
+        wMiss = 0;
+    }
+}
+
+VOID RecordMemAccess(VOID* addr, bool isWrite = false) {
     ll address_val = (ll)addr;
-    l1_cache->access(address_val);
+    access(address_val, isWrite);
 }
 
 VOID Instruction(INS ins, VOID* v) {
     if (INS_IsMemoryRead(ins)) {
-        INS_InsertCall(ins, IPOINT_BEFORE, (AFUNPTR)RecordMemAccess,
-                       IARG_MEMORYREAD_EA, IARG_END);
+        INS_InsertCall(ins, IPOINT_BEFORE, (AFUNPTR)RecordMemAccess, IARG_MEMORYREAD_EA, IARG_BOOL, false, IARG_END);
     }
 
     if (INS_IsMemoryWrite(ins)) {
-        INS_InsertCall(ins, IPOINT_BEFORE, (AFUNPTR)RecordMemAccess,
-                       IARG_MEMORYWRITE_EA, IARG_END);
+        INS_InsertCall(ins, IPOINT_BEFORE, (AFUNPTR)RecordMemAccess, IARG_MEMORYWRITE_EA, IARG_BOOL, true, IARG_END);
+    }
+}
+
+void flushCache() {
+    for (auto& i : cache) {
+        for (auto& j : i.lines) {
+            j.valid = false;
+            j.dirty = false;
+        }
     }
 }
 
 VOID Fini(INT32 code, VOID* v) {
-    l1_cache->printStats();
-    delete l1_cache;
+    cout << "CACHE SIMULATION RESULTS:-\n";
+    cout << "Total Memory Accesses: " << accesses << "\n";
+    cout << "Cache hit: " << hit << "\n";
+    cout << "Cache miss: " << miss << "\n";
+    cout << "Write-backs: " << writeBack << "\n";
+    
+    if (accesses > 0) {
+        cout << fixed << setprecision(2);
+        cout << "Hit Rate: " << ((0.0 + hit) / accesses) * 100 << "%\n";
+        cout << "Miss Rate: " << ((0.0 + miss) / accesses) * 100 << "%\n";
+    }
+    
+    flushCache();
+    
+    if (wAccess > 0) {
+        csvFile << wId << "," << wAccess << "," << wMiss << "\n";
+    }
+    
+    if (csvFile.is_open()) {
+        csvFile.close();
+    }
 }
 
-int main(int argc, char* argv[]) {
+int32_t main(int argc, char* argv[]) {
     if (PIN_Init(argc, argv)) {
-        cerr << "PIN Initialization failed" << endl;
+        cerr << "PIN Initialization error" << endl;
         return -1;
     }
 
-    l1_cache = new CacheSimulator(16384, 64, 4);
+    initCache(16384, 64, 4);
 
     INS_AddInstrumentFunction(Instruction, 0);
     PIN_AddFiniFunction(Fini, 0);
